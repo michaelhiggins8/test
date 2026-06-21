@@ -49,8 +49,6 @@ jobs:
           def key(value):
               return re.sub(r'[^a-z0-9]+', '_', clean(value).lower()).strip('_')
 
-          # The official Texas Open Data CSV publishes descriptions rather than the
-          # raw TREC codes. Raw code equivalents are retained as a compatibility fallback.
           allowed_types = {
               'BROKER INDIVIDUAL',
               'SALES AGENT',
@@ -74,12 +72,14 @@ jobs:
           rejected_type = 0
           rejected_status = 0
           rejected_missing = 0
+          rejected_missing_samples = []
           duplicate_rows = 0
           duplicate_conflicts = []
           type_counts = Counter()
           status_counts = Counter()
           accepted_type_counts = Counter()
           accepted_status_counts = Counter()
+          name_source_counts = Counter()
           status_samples = defaultdict(list)
 
           with source.open('r', encoding='utf-8-sig', errors='replace', newline='') as f:
@@ -98,6 +98,10 @@ jobs:
               name_field = actual('full_name', 'licensee_name', 'name')
               suffix_field = actual('suffix', 'name_suffix')
               status_field = actual('license_status', 'license_status_code', 'status')
+              first_field = actual('first_name', 'firstname', 'given_name')
+              middle_field = actual('middle_name', 'middlename', 'middle_initial')
+              last_field = actual('last_name', 'lastname', 'surname')
+              key_name_field = actual('key_name')
 
               required = {
                   'license_type': type_field,
@@ -133,12 +137,37 @@ jobs:
 
                   license_number = clean(row.get(license_field, ''))
                   full_name = clean(row.get(name_field, ''))
+                  name_source = 'full_name'
+                  if not full_name:
+                      component_name = clean(' '.join([
+                          clean(row.get(first_field, '')) if first_field else '',
+                          clean(row.get(middle_field, '')) if middle_field else '',
+                          clean(row.get(last_field, '')) if last_field else '',
+                      ]))
+                      if component_name:
+                          full_name = component_name
+                          name_source = 'first_middle_last'
+                      elif key_name_field and clean(row.get(key_name_field, '')):
+                          full_name = clean(row.get(key_name_field, ''))
+                          name_source = 'key_name'
+
                   suffix = clean(row.get(suffix_field, '')) if suffix_field else ''
-                  if suffix and not full_name.upper().endswith(suffix.upper()):
+                  if suffix and full_name and not full_name.upper().endswith(suffix.upper()):
                       full_name = clean(f'{full_name} {suffix}')
 
                   if not license_number or not full_name:
                       rejected_missing += 1
+                      if len(rejected_missing_samples) < 100:
+                          rejected_missing_samples.append({
+                              'license_type': license_type,
+                              'status': status,
+                              'license_number': license_number,
+                              'full_name': clean(row.get(name_field, '')),
+                              'first_name': clean(row.get(first_field, '')) if first_field else '',
+                              'middle_name': clean(row.get(middle_field, '')) if middle_field else '',
+                              'last_name': clean(row.get(last_field, '')) if last_field else '',
+                              'key_name': clean(row.get(key_name_field, '')) if key_name_field else '',
+                          })
                       continue
 
                   candidate = {
@@ -161,6 +190,7 @@ jobs:
                   rows_by_license[license_number] = candidate
                   accepted_type_counts[license_type] += 1
                   accepted_status_counts[status] += 1
+                  name_source_counts[name_source] += 1
 
           rows = sorted(
               rows_by_license.values(),
@@ -190,6 +220,7 @@ jobs:
               'rules': {
                   'included_license_types': sorted(allowed_types),
                   'included_statuses': sorted(allowed_statuses),
+                  'name_fallback_order': ['Full Name', 'First + Middle + Last', 'Key Name'],
                   'unique_key': ['state', 'license_number'],
                   'license_number_modified': False,
                   'image_url_policy': 'blank because the official source has no headshot field',
@@ -199,12 +230,14 @@ jobs:
                   'rejected_license_type': rejected_type,
                   'rejected_license_status': rejected_status,
                   'rejected_missing_name_or_license': rejected_missing,
+                  'rejected_missing_samples': rejected_missing_samples,
                   'duplicate_source_rows': duplicate_rows,
                   'duplicate_name_conflicts': duplicate_conflicts[:100],
                   'source_license_type_counts': dict(type_counts),
                   'source_status_counts': dict(status_counts),
                   'accepted_license_type_counts': dict(accepted_type_counts),
                   'accepted_status_counts': dict(accepted_status_counts),
+                  'accepted_name_source_counts': dict(name_source_counts),
                   'status_samples': dict(status_samples),
                   'output_sha256': output_sha256,
               },
@@ -214,6 +247,7 @@ jobs:
               'accepted_unique_rows': len(rows),
               'accepted_license_type_counts': dict(accepted_type_counts),
               'accepted_status_counts': dict(accepted_status_counts),
+              'accepted_name_source_counts': dict(name_source_counts),
               'duplicate_source_rows': duplicate_rows,
               'rejected_missing_name_or_license': rejected_missing,
           }, indent=2, sort_keys=True))
