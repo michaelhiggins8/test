@@ -1,6 +1,8 @@
 name: Temporary TREC blank-name lookup diagnostic
 
 on:
+  pull_request:
+    branches: [master]
   push:
     branches: [temporary-trec-texas-export-20260620]
 
