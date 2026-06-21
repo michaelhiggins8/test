@@ -24,7 +24,6 @@ jobs:
             --output out/trec_source.csv \
             'https://data.texas.gov/api/views/s7ft-44qi/rows.csv?accessType=DOWNLOAD'
           test -s out/trec_source.csv
-          head -c 200 out/trec_source.csv
 
       - name: Keep active individual brokers and sales agents
         shell: bash
@@ -71,8 +70,9 @@ jobs:
           source_rows = 0
           rejected_type = 0
           rejected_status = 0
-          rejected_missing = 0
-          rejected_missing_samples = []
+          rejected_missing_license = 0
+          rejected_missing_license_samples = []
+          accepted_blank_name_samples = []
           duplicate_rows = 0
           duplicate_conflicts = []
           type_counts = Counter()
@@ -102,6 +102,7 @@ jobs:
               middle_field = actual('middle_name', 'middlename', 'middle_initial')
               last_field = actual('last_name', 'lastname', 'surname')
               key_name_field = actual('key_name')
+              agency_identifier_field = actual('agency_identifier')
 
               required = {
                   'license_type': type_field,
@@ -136,6 +137,16 @@ jobs:
                       continue
 
                   license_number = clean(row.get(license_field, ''))
+                  if not license_number:
+                      rejected_missing_license += 1
+                      if len(rejected_missing_license_samples) < 100:
+                          rejected_missing_license_samples.append({
+                              'license_type': license_type,
+                              'status': status,
+                              'full_name': clean(row.get(name_field, '')),
+                          })
+                      continue
+
                   full_name = clean(row.get(name_field, ''))
                   name_source = 'full_name'
                   if not full_name:
@@ -150,25 +161,19 @@ jobs:
                       elif key_name_field and clean(row.get(key_name_field, '')):
                           full_name = clean(row.get(key_name_field, ''))
                           name_source = 'key_name'
+                      else:
+                          name_source = 'official_name_blank'
+                          if len(accepted_blank_name_samples) < 100:
+                              accepted_blank_name_samples.append({
+                                  'license_type': license_type,
+                                  'status': status,
+                                  'license_number': license_number,
+                                  'agency_identifier': clean(row.get(agency_identifier_field, '')) if agency_identifier_field else '',
+                              })
 
                   suffix = clean(row.get(suffix_field, '')) if suffix_field else ''
                   if suffix and full_name and not full_name.upper().endswith(suffix.upper()):
                       full_name = clean(f'{full_name} {suffix}')
-
-                  if not license_number or not full_name:
-                      rejected_missing += 1
-                      if len(rejected_missing_samples) < 100:
-                          rejected_missing_samples.append({
-                              'license_type': license_type,
-                              'status': status,
-                              'license_number': license_number,
-                              'full_name': clean(row.get(name_field, '')),
-                              'first_name': clean(row.get(first_field, '')) if first_field else '',
-                              'middle_name': clean(row.get(middle_field, '')) if middle_field else '',
-                              'last_name': clean(row.get(last_field, '')) if last_field else '',
-                              'key_name': clean(row.get(key_name_field, '')) if key_name_field else '',
-                          })
-                      continue
 
                   candidate = {
                       'name': full_name,
@@ -194,7 +199,7 @@ jobs:
 
           rows = sorted(
               rows_by_license.values(),
-              key=lambda row: (row['name'].casefold(), row['license_number']),
+              key=lambda row: (not bool(row['name']), row['name'].casefold(), row['license_number']),
           )
           with output.open('w', encoding='utf-8', newline='') as f:
               writer = csv.DictWriter(
@@ -220,17 +225,20 @@ jobs:
               'rules': {
                   'included_license_types': sorted(allowed_types),
                   'included_statuses': sorted(allowed_statuses),
-                  'name_fallback_order': ['Full Name', 'First + Middle + Last', 'Key Name'],
+                  'name_fallback_order': ['Full Name', 'First + Middle + Last', 'Key Name', 'blank'],
+                  'blank_name_policy': 'retain active license row when every official name field is blank',
                   'unique_key': ['state', 'license_number'],
                   'license_number_modified': False,
                   'image_url_policy': 'blank because the official source has no headshot field',
               },
               'results': {
                   'accepted_unique_rows': len(rows),
+                  'accepted_blank_name_rows': name_source_counts['official_name_blank'],
+                  'accepted_blank_name_samples': accepted_blank_name_samples,
                   'rejected_license_type': rejected_type,
                   'rejected_license_status': rejected_status,
-                  'rejected_missing_name_or_license': rejected_missing,
-                  'rejected_missing_samples': rejected_missing_samples,
+                  'rejected_missing_license_number': rejected_missing_license,
+                  'rejected_missing_license_samples': rejected_missing_license_samples,
                   'duplicate_source_rows': duplicate_rows,
                   'duplicate_name_conflicts': duplicate_conflicts[:100],
                   'source_license_type_counts': dict(type_counts),
@@ -249,7 +257,7 @@ jobs:
               'accepted_status_counts': dict(accepted_status_counts),
               'accepted_name_source_counts': dict(name_source_counts),
               'duplicate_source_rows': duplicate_rows,
-              'rejected_missing_name_or_license': rejected_missing,
+              'rejected_missing_license_number': rejected_missing_license,
           }, indent=2, sort_keys=True))
           PY
 
