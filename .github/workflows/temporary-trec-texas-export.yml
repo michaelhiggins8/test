@@ -35,7 +35,7 @@ jobs:
           import hashlib
           import json
           import re
-          from collections import Counter
+          from collections import Counter, defaultdict
           from datetime import datetime, timezone
           from pathlib import Path
 
@@ -49,18 +49,23 @@ jobs:
           def key(value):
               return re.sub(r'[^a-z0-9]+', '_', clean(value).lower()).strip('_')
 
+          # The official Texas Open Data CSV publishes descriptions rather than the
+          # raw TREC codes. Raw code equivalents are retained as a compatibility fallback.
           allowed_types = {
-              'SALE',
-              'BRK',
+              'BROKER INDIVIDUAL',
               'SALES AGENT',
-              'INDIVIDUAL BROKER',
+              'BRK',
+              'SALE',
           }
           allowed_statuses = {
-              '20',
-              '30',
+              'ACTIVE',
+              'PROBATION - ACTIVE',
+              'PROBATED REVOCATION - ACTIVE',
+              'PROBATED SUSPENSION - ACTIVE',
               'CURRENT AND ACTIVE',
               'PROBATION AND ACTIVE',
-              'PROBATION ACTIVE',
+              '20',
+              '30',
           }
 
           source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -75,6 +80,7 @@ jobs:
           status_counts = Counter()
           accepted_type_counts = Counter()
           accepted_status_counts = Counter()
+          status_samples = defaultdict(list)
 
           with source.open('r', encoding='utf-8-sig', errors='replace', newline='') as f:
               reader = csv.DictReader(f)
@@ -111,6 +117,12 @@ jobs:
                   status = clean(row.get(status_field, '')).upper()
                   type_counts[license_type] += 1
                   status_counts[status] += 1
+                  if len(status_samples[status]) < 3:
+                      status_samples[status].append({
+                          'license_type': license_type,
+                          'license_number': clean(row.get(license_field, '')),
+                          'name': clean(row.get(name_field, '')),
+                      })
 
                   if license_type not in allowed_types:
                       rejected_type += 1
@@ -193,11 +205,18 @@ jobs:
                   'source_status_counts': dict(status_counts),
                   'accepted_license_type_counts': dict(accepted_type_counts),
                   'accepted_status_counts': dict(accepted_status_counts),
+                  'status_samples': dict(status_samples),
                   'output_sha256': output_sha256,
               },
           }
           report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
-          print(json.dumps(report['results'], indent=2, sort_keys=True))
+          print(json.dumps({
+              'accepted_unique_rows': len(rows),
+              'accepted_license_type_counts': dict(accepted_type_counts),
+              'accepted_status_counts': dict(accepted_status_counts),
+              'duplicate_source_rows': duplicate_rows,
+              'rejected_missing_name_or_license': rejected_missing,
+          }, indent=2, sort_keys=True))
           PY
 
       - name: Upload normalized Texas CSV and report
