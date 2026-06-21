@@ -1,0 +1,211 @@
+name: Temporary official TREC Texas export
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [temporary-trec-texas-export-20260620]
+
+permissions:
+  contents: read
+
+jobs:
+  export-texas-licensees:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download official Texas Open Data CSV
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 \
+            --user-agent 'OfficialRealEstateLicenseCollector/1.0' \
+            --output out/trec_source.csv \
+            'https://data.texas.gov/api/views/s7ft-44qi/rows.csv?accessType=DOWNLOAD'
+          test -s out/trec_source.csv
+          head -c 200 out/trec_source.csv
+
+      - name: Keep active individual brokers and sales agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import csv
+          import hashlib
+          import json
+          import re
+          from collections import Counter
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          source = Path('out/trec_source.csv')
+          output = Path('out/texas_real_estate_agents.csv')
+          report_path = Path('out/texas_real_estate_agents_report.json')
+
+          def clean(value):
+              return re.sub(r'\s+', ' ', (value or '').strip())
+
+          def key(value):
+              return re.sub(r'[^a-z0-9]+', '_', clean(value).lower()).strip('_')
+
+          allowed_types = {
+              'SALE',
+              'BRK',
+              'SALES AGENT',
+              'INDIVIDUAL BROKER',
+          }
+          allowed_statuses = {
+              '20',
+              '30',
+              'CURRENT AND ACTIVE',
+              'PROBATION AND ACTIVE',
+              'PROBATION ACTIVE',
+          }
+
+          source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+          rows_by_license = {}
+          source_rows = 0
+          rejected_type = 0
+          rejected_status = 0
+          rejected_missing = 0
+          duplicate_rows = 0
+          duplicate_conflicts = []
+          type_counts = Counter()
+          status_counts = Counter()
+          accepted_type_counts = Counter()
+          accepted_status_counts = Counter()
+
+          with source.open('r', encoding='utf-8-sig', errors='replace', newline='') as f:
+              reader = csv.DictReader(f)
+              fieldnames = reader.fieldnames or []
+              normalized = {key(name): name for name in fieldnames}
+
+              def actual(*candidates):
+                  for candidate in candidates:
+                      if candidate in normalized:
+                          return normalized[candidate]
+                  return None
+
+              type_field = actual('license_type', 'license_type_code', 'type')
+              license_field = actual('license_number', 'license_no', 'license')
+              name_field = actual('full_name', 'licensee_name', 'name')
+              suffix_field = actual('suffix', 'name_suffix')
+              status_field = actual('license_status', 'license_status_code', 'status')
+
+              required = {
+                  'license_type': type_field,
+                  'license_number': license_field,
+                  'full_name': name_field,
+                  'status': status_field,
+              }
+              missing_fields = [label for label, value in required.items() if value is None]
+              if missing_fields:
+                  raise RuntimeError(
+                      f'Missing required columns {missing_fields}; source columns were {fieldnames}'
+                  )
+
+              for row in reader:
+                  source_rows += 1
+                  license_type = clean(row.get(type_field, '')).upper()
+                  status = clean(row.get(status_field, '')).upper()
+                  type_counts[license_type] += 1
+                  status_counts[status] += 1
+
+                  if license_type not in allowed_types:
+                      rejected_type += 1
+                      continue
+                  if status not in allowed_statuses:
+                      rejected_status += 1
+                      continue
+
+                  license_number = clean(row.get(license_field, ''))
+                  full_name = clean(row.get(name_field, ''))
+                  suffix = clean(row.get(suffix_field, '')) if suffix_field else ''
+                  if suffix and not full_name.upper().endswith(suffix.upper()):
+                      full_name = clean(f'{full_name} {suffix}')
+
+                  if not license_number or not full_name:
+                      rejected_missing += 1
+                      continue
+
+                  candidate = {
+                      'name': full_name,
+                      'state': 'TX',
+                      'image_url': '',
+                      'license_number': license_number,
+                  }
+                  existing = rows_by_license.get(license_number)
+                  if existing is not None:
+                      duplicate_rows += 1
+                      if existing['name'] != candidate['name']:
+                          duplicate_conflicts.append({
+                              'license_number': license_number,
+                              'first_name': existing['name'],
+                              'second_name': candidate['name'],
+                          })
+                      continue
+
+                  rows_by_license[license_number] = candidate
+                  accepted_type_counts[license_type] += 1
+                  accepted_status_counts[status] += 1
+
+          rows = sorted(
+              rows_by_license.values(),
+              key=lambda row: (row['name'].casefold(), row['license_number']),
+          )
+          with output.open('w', encoding='utf-8', newline='') as f:
+              writer = csv.DictWriter(
+                  f,
+                  fieldnames=['name', 'state', 'image_url', 'license_number'],
+                  lineterminator='\n',
+              )
+              writer.writeheader()
+              writer.writerows(rows)
+
+          output_sha256 = hashlib.sha256(output.read_bytes()).hexdigest()
+          report = {
+              'source': {
+                  'agency': 'Texas Real Estate Commission',
+                  'dataset': 'Broker and Sales Agent License Holder Information',
+                  'dataset_id': 's7ft-44qi',
+                  'url': 'https://data.texas.gov/api/views/s7ft-44qi/rows.csv?accessType=DOWNLOAD',
+                  'retrieved_at_utc': datetime.now(timezone.utc).isoformat(),
+                  'sha256': source_sha256,
+                  'columns': fieldnames,
+                  'source_rows': source_rows,
+              },
+              'rules': {
+                  'included_license_types': sorted(allowed_types),
+                  'included_statuses': sorted(allowed_statuses),
+                  'unique_key': ['state', 'license_number'],
+                  'license_number_modified': False,
+                  'image_url_policy': 'blank because the official source has no headshot field',
+              },
+              'results': {
+                  'accepted_unique_rows': len(rows),
+                  'rejected_license_type': rejected_type,
+                  'rejected_license_status': rejected_status,
+                  'rejected_missing_name_or_license': rejected_missing,
+                  'duplicate_source_rows': duplicate_rows,
+                  'duplicate_name_conflicts': duplicate_conflicts[:100],
+                  'source_license_type_counts': dict(type_counts),
+                  'source_status_counts': dict(status_counts),
+                  'accepted_license_type_counts': dict(accepted_type_counts),
+                  'accepted_status_counts': dict(accepted_status_counts),
+                  'output_sha256': output_sha256,
+              },
+          }
+          report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
+          print(json.dumps(report['results'], indent=2, sort_keys=True))
+          PY
+
+      - name: Upload normalized Texas CSV and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: texas-real-estate-agents-official
+          path: |
+            out/texas_real_estate_agents.csv
+            out/texas_real_estate_agents_report.json
+          if-no-files-found: error
+          retention-days: 1
