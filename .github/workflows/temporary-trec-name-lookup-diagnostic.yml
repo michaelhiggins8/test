@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Download sample official license detail pages
+      - name: Download sample official license detail pages and client script
         shell: bash
         run: |
           set -euo pipefail
@@ -26,10 +26,15 @@ jobs:
               "https://www.trec.texas.gov/license-search/?detail_id=${id}"
             echo "${id}: $(wc -c < "lookup/${id}.html") bytes"
           done
-      - name: Upload sample pages
+          curl --fail --location --retry 3 \
+            --user-agent 'OfficialRealEstateLicenseCollector/1.0' \
+            --output lookup/license-search-client.js \
+            'https://www.trec.texas.gov/apps/license-search/dist/assets/index-B99pv9Vd.js'
+          echo "client script: $(wc -c < lookup/license-search-client.js) bytes"
+      - name: Upload sample pages and client script
         uses: actions/upload-artifact@v4
         with:
           name: trec-blank-name-detail-pages
-          path: lookup/*.html
+          path: lookup/*
           if-no-files-found: error
           retention-days: 1
