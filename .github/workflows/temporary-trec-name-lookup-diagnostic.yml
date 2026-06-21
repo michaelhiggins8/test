@@ -1,0 +1,33 @@
+name: Temporary TREC blank-name lookup diagnostic
+
+on:
+  push:
+    branches: [temporary-trec-texas-export-20260620]
+
+permissions:
+  contents: read
+
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download sample official license detail pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lookup
+          for id in 844106-B 830962-SA 741332-B; do
+            curl --fail --location --retry 3 \
+              --user-agent 'OfficialRealEstateLicenseCollector/1.0' \
+              --output "lookup/${id}.html" \
+              "https://www.trec.texas.gov/license-search/?detail_id=${id}"
+            echo "${id}: $(wc -c < "lookup/${id}.html") bytes"
+          done
+      - name: Upload sample pages
+        uses: actions/upload-artifact@v4
+        with:
+          name: trec-blank-name-detail-pages
+          path: lookup/*.html
+          if-no-files-found: error
+          retention-days: 1
