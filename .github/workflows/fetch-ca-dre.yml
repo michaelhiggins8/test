@@ -1,117 +1,24 @@
-name: Fetch official California DRE data
+name: Package official California DRE data
 
 on:
-  push:
-    paths:
-      - '.github/workflows/fetch-ca-dre.yml'
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download official daily DRE file
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -L --fail --retry 4 --retry-delay 5 \
-            'https://secure.dre.ca.gov/datafile/CurrList.zip' \
-            -o CurrList.zip
-          sha256sum CurrList.zip > source_sha256.txt
-          unzip -o CurrList.zip
-
-      - name: Normalize individual California licensees
-        shell: bash
-        run: |
-          python - <<'PY'
-          import csv
-          import glob
-          import json
-          from collections import Counter
-
-          candidates = glob.glob('**/CurrList.csv', recursive=True)
-          if not candidates:
-              candidates = [p for p in glob.glob('**/*.csv', recursive=True)
-                            if not p.endswith('california_real_estate_agents.csv')]
-          if not candidates:
-              raise SystemExit('No CSV was extracted from CurrList.zip')
-          source = candidates[0]
-
-          def clean_key(value):
-              return ''.join(ch for ch in value.lower() if ch.isalnum())
-
-          rows = []
-          seen = set()
-          type_counts = Counter()
-          status_counts = Counter()
-          duplicate_license_rows = 0
-
-          with open(source, 'r', encoding='cp1252', errors='replace', newline='') as handle:
-              reader = csv.DictReader(handle)
-              original_headers = reader.fieldnames or []
-              headers = {clean_key(h): h for h in original_headers}
-
-              def get(row, *names):
-                  for name in names:
-                      key = clean_key(name)
-                      if key in headers:
-                          return (row.get(headers[key]) or '').strip()
-                  return ''
-
-              for row in reader:
-                  license_type = get(row, 'lic_type', 'license_type')
-                  license_status = get(row, 'lic_status', 'license_status')
-                  type_counts[license_type] += 1
-                  status_counts[license_status] += 1
-                  if license_type.casefold() not in {'salesperson', 'broker', 'officer'}:
-                      continue
-                  license_number = get(row, 'lic_number', 'license_number')
-                  if not license_number:
-                      continue
-                  if license_number in seen:
-                      duplicate_license_rows += 1
-                      continue
-                  first = get(row, 'firstname_secondary', 'first_name')
-                  last = get(row, 'lastname_primary', 'last_name')
-                  suffix = get(row, 'name_suffix', 'suffix')
-                  name = ' '.join(part for part in (first, last, suffix) if part).strip()
-                  if not name:
-                      continue
-                  seen.add(license_number)
-                  rows.append((name, 'CA', '', license_number))
-
-          rows.sort(key=lambda row: (row[0].casefold(), row[3]))
-          with open('california_real_estate_agents.csv', 'w', encoding='utf-8', newline='') as handle:
-              writer = csv.writer(handle)
-              writer.writerow(['name', 'state', 'image_url', 'license_number'])
-              writer.writerows(rows)
-
-          profile = {
-              'source_file': source,
-              'source_headers': original_headers,
-              'source_type_counts': dict(type_counts),
-              'source_status_counts': dict(status_counts),
-              'included_license_types': ['Broker', 'Officer', 'Salesperson'],
-              'included_rows': len(rows),
-              'duplicate_individual_license_rows_removed': duplicate_license_rows,
-              'unique_license_numbers': len(seen),
-          }
-          with open('california_profile.json', 'w', encoding='utf-8') as handle:
-              json.dump(profile, handle, indent=2, ensure_ascii=False)
-          print(json.dumps(profile, indent=2, ensure_ascii=False))
-          PY
-
-      - name: Commit temporary normalized output
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add california_real_estate_agents.csv california_profile.json source_sha256.txt
-          git commit -m 'Temporary normalized California DRE data'
-          git push
+      - name: Upload normalized official California data
+        uses: actions/upload-artifact@v4
+        with:
+          name: california-dre-agents
+          path: |
+            california_real_estate_agents.csv
+            california_profile.json
+            source_sha256.txt
+          retention-days: 1
+          compression-level: 6
