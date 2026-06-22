@@ -57,8 +57,7 @@ jobs:
               value = clean(value)
               if not value:
                   return 0.0
-              candidates = [value, value.replace("Z", "+00:00")]
-              for candidate in candidates:
+              for candidate in (value, value.replace("Z", "+00:00")):
                   try:
                       dt = datetime.fromisoformat(candidate)
                       if dt.tzinfo is None:
@@ -80,10 +79,7 @@ jobs:
                       "first_name,middle,last_name,prefix,suffix,"
                       "original_issue_date,effective_date,expiration_date,lastmodifieddate"
                   ),
-                  "$where": (
-                      "license_type = 'REAL ESTATE' AND "
-                      "license_status = 'ACTIVE' AND business = 'N'"
-                  ),
+                  "$where": "license_type = 'REAL ESTATE' AND license_status = 'ACTIVE'",
                   "$order": "license_number ASC, :id ASC",
                   "$limit": str(limit),
                   "$offset": str(offset),
@@ -96,17 +92,14 @@ jobs:
                       "Accept": "application/json",
                   },
               )
-              last_error = None
               for attempt in range(6):
                   try:
                       with urllib.request.urlopen(request, timeout=180) as response:
                           return json.load(response)
-                  except Exception as exc:
-                      last_error = exc
+                  except Exception:
                       if attempt == 5:
                           raise
                       time.sleep(2 ** attempt)
-              raise last_error
 
           records = {}
           conflicts = []
@@ -116,6 +109,7 @@ jobs:
           blank_name_rows = 0
           excluded_code_counts = Counter()
           raw_description_counts = Counter()
+          accepted_business_counts = Counter()
           offset = 0
           page_size = 50000
 
@@ -155,6 +149,7 @@ jobs:
                       "license_number": license_number,
                       "code": code,
                       "description": description,
+                      "business": clean(row.get("business")),
                       "lastmodifieddate": clean(row.get("lastmodifieddate")),
                       "expiration_date": clean(row.get("expiration_date")),
                       "effective_date": clean(row.get("effective_date")),
@@ -192,10 +187,11 @@ jobs:
           rows = sorted(records.values(), key=lambda r: (r["name"].casefold(), r["license_number"]))
           accepted_code_counts = Counter(row["code"] for row in rows)
           accepted_description_counts = Counter(row["description"] for row in rows)
+          accepted_business_counts.update(clean(row["business"]) or "(blank)" for row in rows)
 
-          if not (55000 <= len(rows) <= 80000):
+          if not (60000 <= len(rows) <= 80000):
               raise RuntimeError(f"Illinois accepted row count failed sanity range: {len(rows)}")
-          minimums = {"471": 10000, "472": 50, "473": 1500, "475": 45000}
+          minimums = {"471": 12000, "472": 100, "473": 2200, "475": 48000}
           for code, minimum in minimums.items():
               if accepted_code_counts[code] < minimum:
                   raise RuntimeError(
@@ -221,13 +217,14 @@ jobs:
               "source_query": {
                   "license_type": "REAL ESTATE",
                   "license_status": "ACTIVE",
-                  "business": "N",
+                  "individual_filter": "Exact IDFPR individual license-number classes 471, 472, 473, and 475; business flag not used because it is inconsistent for these classes",
               },
               "included_license_codes": TARGET_CODES,
-              "raw_active_individual_real_estate_rows": raw_rows,
+              "raw_active_real_estate_rows": raw_rows,
               "accepted_unique_license_rows": len(rows),
               "accepted_code_counts": dict(sorted(accepted_code_counts.items())),
               "accepted_description_counts": dict(sorted(accepted_description_counts.items())),
+              "accepted_business_flag_counts": dict(sorted(accepted_business_counts.items())),
               "may_1_2026_idfpr_active_report_counts": MAY_1_2026_ACTIVE_COUNTS,
               "difference_from_may_1_report": {
                   code: accepted_code_counts[code] - expected
