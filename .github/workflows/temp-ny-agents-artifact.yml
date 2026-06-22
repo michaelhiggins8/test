@@ -1,0 +1,30 @@
+name: Temporary NY agents artifact
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'ny-build-trigger.txt'
+      - 'scripts/build_ny_agents.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build normalized New York CSV
+        run: python scripts/build_ny_agents.py
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-york-real-estate-agents-official
+          path: |
+            new_york_real_estate_agents_official.csv
+            new_york_real_estate_agents_report.json
+            new_york_real_estate_agents_conflicts.csv
+          if-no-files-found: error
+          retention-days: 1
